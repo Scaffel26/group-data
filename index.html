@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Данные группы на графике</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6f9;color:#1e2430}
+main{max-width:960px;margin:0 auto;padding:16px}
+h1{font-size:1.5rem;margin:8px 0 16px}
+h2{font-size:1.15rem;margin:0 0 10px}
+section{margin-bottom:28px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.kpi,.card{background:#fff;border-radius:10px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.kpi b{display:block;font-size:1.8rem;line-height:1.2}
+.kpi span{font-size:.85rem;color:#5b6573}
+.chart{height:320px;width:100%}
+.tbl{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.85rem}
+th,td{padding:6px 8px;border-bottom:1px solid #e3e7ee;text-align:left;vertical-align:top}
+tr.bad td{background:#fde2e2;color:#8a1c1c}
+footer,.note{font-size:.8rem;color:#5b6573;margin-top:8px}
+#msg{background:#fff3cd;border-radius:10px;padding:12px;display:none;margin-bottom:16px}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+</head>
+<body>
+<main>
+<h1>Данные группы на графике</h1>
+<div id="msg"></div>
+
+<section id="attendance" hidden>
+  <h2>Посещаемость</h2>
+  <div class="kpis">
+    <div class="kpi"><b id="a-avg">–</b><span>средняя посещаемость</span></div>
+    <div class="kpi"><b id="a-n">–</b><span>студентов</span></div>
+    <div class="kpi"><b id="a-l">–</b><span>занятий</span></div>
+  </div>
+  <div class="card"><div id="a-line" class="chart"></div></div>
+  <div class="card" style="margin-top:12px"><div id="a-bar" class="chart"></div></div>
+  <footer>Данные: attendance.csv в этом репозитории. Список обезличен: фамилий нет, строки перемешаны, студенты обозначены кодами.</footer>
+</section>
+
+<section id="stakes" hidden>
+  <h2>Ставки однокурсников</h2>
+  <div class="kpis">
+    <div class="kpi"><b id="s-n">–</b><span>ставок</span></div>
+    <div class="kpi"><b id="s-yes">–</b><span>с check = да</span></div>
+    <div class="kpi"><b id="s-conf">–</b><span>средняя уверенность</span></div>
+    <div class="kpi"><b id="s-next">–</b><span>ближайший срок</span></div>
+  </div>
+  <div class="card"><div id="s-scatter" class="chart"></div></div>
+  <div class="card" style="margin-top:12px"><div id="s-bar" class="chart"></div></div>
+  <div class="card tbl" style="margin-top:12px"><table id="s-table"></table></div>
+  <p class="note">Красным отмечены строки без срока, без источника или с уверенностью вне 0–100. Оценивается проверяемость ставки, а не её автор.</p>
+  <footer>Данные: stakes.csv в этом репозитории, из открытых портфолио econ-portfolio.</footer>
+</section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const charts = [];
+function showMsg(t){ const m=$('msg'); m.style.display='block'; m.textContent=t; }
+function chart(id, opt){ const c=echarts.init($(id)); c.setOption(opt); charts.push(c); }
+function esc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// CSV: кавычки, запятая или точка с запятой, UTF-8 или windows-1251
+function parseCSV(text){
+  text = text.replace(/^\uFEFF/, '');
+  const first = text.split(/\r?\n/)[0] || '';
+  const d = first.split(';').length > first.split(',').length ? ';' : ',';
+  const rows = []; let row = [], f = '', q = false;
+  for (let i = 0; i < text.length; i++){
+    const c = text[i];
+    if (q){
+      if (c === '"'){ if (text[i+1] === '"'){ f += '"'; i++; } else q = false; }
+      else f += c;
+    } else if (c === '"') q = true;
+    else if (c === d){ row.push(f); f = ''; }
+    else if (c === '\n' || c === '\r'){
+      if (c === '\r' && text[i+1] === '\n') i++;
+      row.push(f); f = ''; rows.push(row); row = [];
+    } else f += c;
+  }
+  if (f !== '' || row.length){ row.push(f); rows.push(row); }
+  return rows.filter(r => r.some(x => x.trim() !== '')).map(r => r.map(x => x.trim()));
+}
+async function loadCSV(name){
+  const r = await fetch(name + '?v=' + Date.now());
+  if (!r.ok) throw new Error(name + ': HTTP ' + r.status);
+  const buf = await r.arrayBuffer();
+  let text;
+  try { text = new TextDecoder('utf-8', {fatal:true}).decode(buf); }
+  catch(e){ text = new TextDecoder('windows-1251').decode(buf); }
+  return parseCSV(text);
+}
+
+function attendance(rows){
+  const dates = rows[0].slice(1);
+  const st = rows.slice(1);
+  let ones = 0, filled = 0;
+  const per = dates.map((_, j) => {
+    let s = 0, n = 0;
+    st.forEach(r => { const v = r[j+1]; if (v === '1' || v === '0'){ n++; s += +v; } });
+    ones += s; filled += n;
+    return n ? +(s / n * 100).toFixed(1) : null;
+  });
+  const valid = per.filter(x => x !== null);
+  const avg = valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : 0; // простое среднее по занятиям
+  const bins = [0, 0, 0, 0];
+  st.forEach(r => {
+    let s = 0, n = 0;
+    r.slice(1).forEach(v => { if (v === '1' || v === '0'){ n++; s += +v; } });
+    if (!n) return;
+    const p = s / n * 100;
+    bins[p < 25 ? 0 : p < 50 ? 1 : p < 75 ? 2 : 3]++;
+  });
+  $('a-avg').textContent = avg.toFixed(1) + ' %';
+  $('a-n').textContent = st.length;
+  $('a-l').textContent = dates.length;
+  chart('a-line', {
+    title: {text: 'Явка по занятиям, %', textStyle: {fontSize: 14}},
+    tooltip: {trigger: 'axis'},
+    grid: {left: 40, right: 16, top: 40, bottom: 50},
+    xAxis: {type: 'category', data: dates, axisLabel: {rotate: 45}},
+    yAxis: {type: 'value', min: 0, max: 100},
+    series: [{name: 'Явка, %', type: 'line', data: per, smooth: false, connectNulls: true,
+      markLine: {symbol: 'none', lineStyle: {type: 'dashed', color: '#d9534f'},
+        label: {formatter: 'среднее ' + avg.toFixed(1) + '%'}, data: [{yAxis: +avg.toFixed(1)}]}}]
+  });
+  chart('a-bar', {
+    title: {text: 'Студенты по доле посещённых занятий', textStyle: {fontSize: 14}},
+    tooltip: {},
+    grid: {left: 40, right: 16, top: 40, bottom: 30},
+    xAxis: {type: 'category', data: ['< 25 %', '25–50 %', '50–75 %', '≥ 75 %']},
+    yAxis: {type: 'value', minInterval: 1},
+    series: [{type: 'bar', data: bins, label: {show: true, position: 'top'}}]
+  });
+  $('attendance').hidden = false;
+}
+
+const validDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(new Date(s));
+function stakes(rows){
+  const h = rows[0].map(x => x.toLowerCase());
+  const idx = k => h.indexOf(k);
+  const data = rows.slice(1).map(r => {
+    const g = k => idx(k) < 0 ? '' : (r[idx(k)] || '');
+    return {author: g('author'), topic: g('topic'), stake: g('stake'), deadline: g('deadline'),
+      conf: g('confidence') === '' ? NaN : +g('confidence').replace(',', '.'),
+      ai: g('ai_confidence') === '' ? NaN : +g('ai_confidence').replace(',', '.'),
+      where: g('where_to_check'), check: g('check').toLowerCase(), comment: g('comment')};
+  });
+  const confs = data.map(d => d.conf).filter(x => !isNaN(x) && x >= 0 && x <= 100);
+  const today = new Date().toISOString().slice(0, 10);
+  const dl = data.map(d => d.deadline).filter(validDate).sort();
+  const next = dl.find(x => x >= today) || dl[0] || '–';
+  $('s-n').textContent = data.length;
+  $('s-yes').textContent = data.filter(d => d.check === 'да').length;
+  $('s-conf').textContent = confs.length ? (confs.reduce((a, b) => a + b, 0) / confs.length).toFixed(1) + ' %' : '–';
+  $('s-next').textContent = next;
+
+  const colors = {'да': '#2e9e5b', 'частично': '#e8a317', 'нет': '#d9534f'};
+  const pts = d => ({value: [d.deadline, d.conf], stake: d.stake, author: d.author});
+  const plot = data.filter(d => validDate(d.deadline) && !isNaN(d.conf));
+  const series = ['да', 'частично', 'нет'].map(k => ({
+    name: 'check: ' + k, type: 'scatter', symbolSize: 12, itemStyle: {color: colors[k]},
+    data: plot.filter(d => d.check === k).map(pts)}));
+  const withAi = plot.filter(d => !isNaN(d.ai));
+  if (withAi.length) series.push({name: 'Уверенность ИИ', type: 'scatter', symbol: 'diamond', symbolSize: 12,
+    itemStyle: {color: 'transparent', borderColor: '#555', borderWidth: 2},
+    data: withAi.map(d => ({value: [d.deadline, d.ai], stake: d.stake, author: 'ИИ'}))});
+  chart('s-scatter', {
+    title: {text: 'Срок проверки и уверенность', textStyle: {fontSize: 14}},
+    legend: {top: 24, type: 'scroll'},
+    tooltip: {formatter: p => esc(p.data.author) + ': ' + esc(p.data.stake) + '<br>срок ' + p.value[0] + ', уверенность ' + p.value[1]},
+    grid: {left: 40, right: 16, top: 70, bottom: 30},
+    xAxis: {type: 'time'}, yAxis: {type: 'value', min: 0, max: 100, name: '%'},
+    series: series
+  });
+
+  const q = {};
+  data.forEach(d => { if (validDate(d.deadline)){
+    const k = d.deadline.slice(0, 4) + ' Q' + (Math.floor((+d.deadline.slice(5, 7) - 1) / 3) + 1);
+    q[k] = (q[k] || 0) + 1; } });
+  const keys = Object.keys(q).sort();
+  chart('s-bar', {
+    title: {text: 'Ставок по кварталам срока', textStyle: {fontSize: 14}},
+    tooltip: {}, grid: {left: 40, right: 16, top: 40, bottom: 30},
+    xAxis: {type: 'category', data: keys}, yAxis: {type: 'value', minInterval: 1},
+    series: [{type: 'bar', data: keys.map(k => q[k]), label: {show: true, position: 'top'}}]
+  });
+
+  let html = '<tr><th>Автор</th><th>Тема</th><th>Ставка</th><th>Срок</th><th>Увер.</th><th>Где проверить</th><th>check</th><th>Комментарий</th></tr>';
+  data.forEach(d => {
+    const bad = !validDate(d.deadline) || !d.where || isNaN(d.conf) || d.conf < 0 || d.conf > 100;
+    html += '<tr' + (bad ? ' class="bad"' : '') + '><td>' + [d.author, d.topic, d.stake, d.deadline,
+      isNaN(d.conf) ? '' : d.conf, d.where, d.check, d.comment].map(esc).join('</td><td>') + '</td></tr>';
+  });
+  $('s-table').innerHTML = html;
+  $('stakes').hidden = false;
+}
+
+async function start(){
+  const jobs = [['attendance.csv', attendance], ['stakes.csv', stakes]];
+  const errs = []; let ok = 0;
+  for (const [name, fn] of jobs){
+    try { fn(await loadCSV(name)); ok++; }
+    catch(e){ errs.push(name + ' — ' + e.message); }
+  }
+  if (!ok) showMsg('Не удалось загрузить данные (' + errs.join('; ') + '). Файл CSV должен лежать рядом с index.html, страницу нужно открывать по адресу github.io, а не двойным щелчком с диска.');
+  else if (errs.length) console.info('Не найден необязательный файл:', errs);
+}
+window.addEventListener('resize', () => charts.forEach(c => c.resize()));
+window.addEventListener('load', () => {
+  if (window.echarts) return start();
+  const s = document.createElement('script');
+  s.src = 'echarts.min.js';
+  s.onload = start;
+  s.onerror = () => showMsg('ECharts не загрузился ни с CDN, ни локально. Скачайте echarts.min.js и положите в репозиторий.');
+  document.head.appendChild(s);
+});
+</script>
+</body>
+</html>
